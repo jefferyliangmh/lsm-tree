@@ -2,6 +2,7 @@
 #include "lsm/async_io.h"
 #include "lsm/crc32c.h"
 #include "lsm/env.h"
+#include "lsm/metrics.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -123,7 +124,13 @@ namespace lsm {
         }
 
         std::string bloom_data;
-        if (opt_.use_bloom) bloom_data = bloom_.Finish();
+        if (opt_.use_bloom) {
+            bloom_data = bloom_.Finish();
+            if (opt_.filter_kind == FilterKind::kLearnedBloom) {
+                bloom_data = WrapLearnedBloom(bloom_data, bloom_key_buffer_,
+                    bloom_key_offsets_);
+            }
+        }
         uint64_t bloom_off = offset_;
         uint64_t bloom_size = bloom_data.size();
         if (!bloom_data.empty()) {
@@ -267,7 +274,10 @@ namespace lsm {
         ShardedLRUCache::CacheKey ck{ file_number_, h.offset };
         if (cache_) {
             *block = cache_->Lookup(ck);
-            if (*block) return Status::OK();
+            if (*block) {
+                EngineCounters::block_cache_hits.fetch_add(1, std::memory_order_relaxed);
+                return Status::OK();
+            }
         }
 
         std::string data(h.size + kBlockTrailerSize, '\0');
@@ -284,6 +294,9 @@ namespace lsm {
         uint32_t actual_crc = CRC32C::Compute(data.data(), h.size);
         if (stored_crc != actual_crc)
             return Status::Corruption("data block checksum mismatch: " + path_);
+
+        EngineCounters::block_reads.fetch_add(1, std::memory_order_relaxed);
+        EngineCounters::block_read_bytes.fetch_add(data.size(), std::memory_order_relaxed);
 
         data.resize(h.size);
         if (cache_) {
@@ -309,10 +322,21 @@ namespace lsm {
 
     TableReader::Result TableReader::Get(const Slice& user_key) const {
         Result res;
-        if (!bloom_.Empty() && !bloom_.MightContain(user_key)) return res;
+        if (telemetry_) telemetry_->lookups.fetch_add(1, std::memory_order_relaxed);
+        if (!bloom_.Empty() && !bloom_.MightContain(user_key)) {
+            if (telemetry_) telemetry_->bloom_rejects.fetch_add(1, std::memory_order_relaxed);
+            return res;
+        }
+        const bool bloom_said_yes = !bloom_.Empty();
+        if (bloom_said_yes && telemetry_)
+            telemetry_->bloom_hits.fetch_add(1, std::memory_order_relaxed);
 
         size_t idx = FindIndexPos(user_key);
-        if (idx >= index_.size()) return res;
+        if (idx >= index_.size()) {
+            if (bloom_said_yes && telemetry_)
+                telemetry_->false_positives.fetch_add(1, std::memory_order_relaxed);
+            return res;
+        }
 
         std::shared_ptr<Block> block;
         res.status = ReadBlock(index_[idx].handle, &block);
@@ -339,15 +363,101 @@ namespace lsm {
                 seek_ok = true;
             }
         }
-        if (!seek_ok) return res;
+        if (!seek_ok) {
+            if (bloom_said_yes && telemetry_)
+                telemetry_->false_positives.fetch_add(1, std::memory_order_relaxed);
+            return res;
+        }
 
-        if (UserKeyOf(Slice(found_key)).compare(user_key) != 0) return res;
+        if (UserKeyOf(Slice(found_key)).compare(user_key) != 0) {
+            if (bloom_said_yes && telemetry_)
+                telemetry_->false_positives.fetch_add(1, std::memory_order_relaxed);
+            return res;
+        }
 
         res.found = true;
         res.value.assign(found_value.data(), found_value.size());
         uint64_t tag = DecodeFixed64BE(found_key.data() + found_key.size() - 8);
         res.type = static_cast<ValueType>(tag & 0xFF);
+        if (telemetry_) telemetry_->found.fetch_add(1, std::memory_order_relaxed);
         return res;
+    }
+
+    Status TableReader::PrefetchDataBlocks(AsyncIOBackend* backend) const {
+        if (!backend || !file_ || index_.empty()) return Status::OK();
+
+        struct Pending {
+            BlockHandle handle;
+            std::string buf;
+        };
+        std::vector<Pending> pending;
+        pending.reserve(index_.size());
+        for (const auto& entry : index_) {
+            if (cache_) {
+                ShardedLRUCache::CacheKey ck{ file_number_, entry.handle.offset };
+                if (cache_->Lookup(ck)) continue;
+            }
+            if (entry.handle.size > SIZE_MAX - kBlockTrailerSize ||
+                !InRange(entry.handle.offset,
+                    entry.handle.size + kBlockTrailerSize, file_size_))
+                continue;
+            Pending item;
+            item.handle = entry.handle;
+            item.buf.resize(entry.handle.size + kBlockTrailerSize);
+            pending.push_back(std::move(item));
+        }
+
+        constexpr size_t kWindow = 32;
+        for (size_t start = 0; start < pending.size(); start += kWindow) {
+            const size_t n = std::min(kWindow, pending.size() - start);
+            std::vector<AsyncIOBackend::Request> reqs;
+            reqs.reserve(n);
+            for (size_t i = 0; i < n; ++i) {
+                auto& item = pending[start + i];
+                AsyncIOBackend::Request req;
+                req.file = file_.get();
+                req.offset = item.handle.offset;
+                req.buf = item.buf.data();
+                req.len = item.buf.size();
+                req.user_data = i;
+                reqs.push_back(req);
+            }
+            Status st = backend->Submit(reqs);
+            if (!st.ok()) return st;
+            std::vector<uint64_t> done;
+            std::vector<Status> statuses;
+            st = backend->Wait(static_cast<unsigned>(n), &done, &statuses);
+            if (!st.ok()) return st;
+            if (done.size() != n || statuses.size() != n)
+                return Status::IOError("prefetch completion count mismatch");
+
+            std::vector<int> order(n, -1);
+            for (size_t k = 0; k < n; ++k) {
+                if (done[k] >= n)
+                    return Status::IOError("prefetch tag out of range");
+                order[done[k]] = static_cast<int>(k);
+            }
+            for (size_t i = 0; i < n; ++i) {
+                if (order[i] < 0 || !statuses[static_cast<size_t>(order[i])].ok())
+                    continue;
+                auto& item = pending[start + i];
+                if (item.buf.size() != item.handle.size + kBlockTrailerSize) continue;
+                if (item.buf[item.handle.size] != 0) continue;
+                uint32_t stored_crc = 0;
+                std::memcpy(&stored_crc, item.buf.data() + item.handle.size + 1, 4);
+                const uint32_t actual = CRC32C::Compute(item.buf.data(), item.handle.size);
+                if (stored_crc != actual) continue;
+                item.buf.resize(item.handle.size);
+                EngineCounters::prefetch_blocks.fetch_add(1, std::memory_order_relaxed);
+                EngineCounters::prefetch_bytes.fetch_add(item.buf.size(),
+                    std::memory_order_relaxed);
+                if (cache_) {
+                    ShardedLRUCache::CacheKey ck{ file_number_, item.handle.offset };
+                    cache_->Insert(ck, std::move(item.buf));
+                }
+            }
+        }
+        return Status::OK();
     }
 
     // ============================================================================
@@ -517,7 +627,7 @@ namespace lsm {
         // -------------------------------------------------------------------
         // 阶段 1：FileExists 预检 + 打开文件
         //
-        // 缺失的文件只消耗一次 stat 系统调用（~10μs），
+        // 缺失的文件只消耗一次 stat 系统调用（~10渭s），
         // 而不是一次 open 系统调用（~1ms）。
         // -------------------------------------------------------------------
         size_t valid_count = 0;
