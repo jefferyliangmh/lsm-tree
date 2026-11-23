@@ -1,7 +1,9 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 #include "lsm/slice.h"
 #include "lsm/hash_avx2.h"
@@ -32,13 +34,13 @@ namespace lsm {
             if (k_ > 30) k_ = 30;
         }
 
-        // µ¥ÌõÌí¼Ó£º×ß HashOne£¨ÄÚ²¿ count=1 ±êÁ¿Â·¾¶£©
+        // å•æ¡æ·»åŠ ï¼šèµ° HashOneï¼ˆå†…éƒ¨ count=1 æ ‡é‡è·¯å¾„ï¼‰
         void Add(const Slice& key) {
             uint64_t h64 = BloomHash::HashOne(key.data(), key.size());
             hashes_.push_back(h64);
         }
 
-        // ¡ï ÅúÁ¿Ìí¼Ó£ºÒ»´Î´¥·¢ AVX2 4 Â·²¢ĞĞ¹şÏ£
+        // â˜… æ‰¹é‡æ·»åŠ ï¼šä¸€æ¬¡è§¦å‘ AVX2 4 è·¯å¹¶è¡Œå“ˆå¸Œ
         void AddBatch(const std::vector<Slice>& keys) {
             size_t n = keys.size();
             if (n == 0) return;
@@ -56,7 +58,7 @@ namespace lsm {
             for (size_t i = 0; i < n; ++i) hashes_.push_back(h64s[i]);
         }
 
-        // Ö±½ÓÌí¼ÓÒÑ¼ÆËãµÄ 64 Î»¹şÏ££¨TableBuilder ÓÃ£©
+        // ç›´æ¥æ·»åŠ å·²è®¡ç®—çš„ 64 ä½å“ˆå¸Œï¼ˆTableBuilder ç”¨ï¼‰
         void AddRaw(uint64_t h64) {
             hashes_.push_back(h64);
         }
@@ -92,25 +94,88 @@ namespace lsm {
         std::vector<uint64_t> hashes_;
     };
 
+    // å­¦ä¹ å‹è¿‡æ»¤å™¨åŒ…è£…ï¼šç²¾ç¡®çš„ 2 å­—èŠ‚å‰ç¼€é›†åˆï¼ˆæ— å‡é˜´æ€§ï¼‰+ ç»å…¸ Bloomã€‚
+    // å‰ç¼€åŸºæ•°å¤ªé«˜æ—¶é€€å›çº¯ Bloomï¼Œé¿å…åŒ…è£…æ¯”ä½å›¾è¿˜å¤§ã€‚
+    inline std::string WrapLearnedBloom(const std::string& classic,
+        const std::string& key_blob,
+        const std::vector<std::pair<size_t, size_t>>& spans) {
+        if (classic.empty() || spans.empty()) return classic;
+        std::vector<uint16_t> prefixes;
+        prefixes.reserve(spans.size());
+        for (const auto& span : spans) {
+            if (span.first > key_blob.size() || span.second > key_blob.size() - span.first)
+                continue;
+            const char* p = key_blob.data() + span.first;
+            uint16_t prefix = 0;
+            if (span.second >= 2) {
+                prefix = static_cast<uint16_t>(static_cast<uint8_t>(p[0])) |
+                    (static_cast<uint16_t>(static_cast<uint8_t>(p[1])) << 8);
+            } else if (span.second == 1) {
+                prefix = static_cast<uint8_t>(p[0]);
+            }
+            prefixes.push_back(prefix);
+        }
+        std::sort(prefixes.begin(), prefixes.end());
+        prefixes.erase(std::unique(prefixes.begin(), prefixes.end()), prefixes.end());
+        if (prefixes.empty() || prefixes.size() > 4096) return classic;
+        if (spans.size() > 32 && prefixes.size() * 2 > spans.size()) return classic;
+
+        std::string out;
+        out.reserve(6 + prefixes.size() * 2 + classic.size());
+        out.append("LRNB", 4);
+        const uint16_t count = static_cast<uint16_t>(prefixes.size());
+        out.append(reinterpret_cast<const char*>(&count), sizeof(count));
+        out.append(reinterpret_cast<const char*>(prefixes.data()), prefixes.size() * sizeof(uint16_t));
+        out.append(classic);
+        return out;
+    }
+
+    inline uint16_t BloomKeyPrefix(const Slice& key) noexcept {
+        if (key.size() >= 2) {
+            return static_cast<uint16_t>(static_cast<uint8_t>(key.data()[0])) |
+                (static_cast<uint16_t>(static_cast<uint8_t>(key.data()[1])) << 8);
+        }
+        if (key.size() == 1) return static_cast<uint8_t>(key.data()[0]);
+        return 0;
+    };
+
     // ============================================================================
-    // BloomFilter£ºFastMod + Ô¤È¡Á÷Ë®Ïß
+    // BloomFilterï¼šFastMod + é¢„å–æµæ°´çº¿
     //
-    // ¹Ø¼üÓÅ»¯£º
-    //   1. FastMod£ºÓÃ³Ë·¨ÄæÔªÌæ´ú % bits£¨30 cycle ¡ú 3 cycle£©
-    //   2. ÅúÁ¿ËãÎ»ÖÃ ¡ú Ò»´ÎĞÔÔ¤È¡ ¡ú ±êÁ¿¼ì²é£¨±£³ÖÌáÇ°ÍË³ö£©
-    //   3. ²»×ö AVX2 gather£¨Êµ²â±È±êÁ¿Âı£¬ÇÒÎŞ·¨ÌáÇ°ÍË³ö£©
+    // å…³é”®ä¼˜åŒ–ï¼š
+    //   1. FastModï¼šç”¨ä¹˜æ³•é€†å…ƒæ›¿ä»£ % bitsï¼ˆ30 cycle â†’ 3 cycleï¼‰
+    //   2. æ‰¹é‡ç®—ä½ç½® â†’ ä¸€æ¬¡æ€§é¢„å– â†’ æ ‡é‡æ£€æŸ¥ï¼ˆä¿æŒæå‰é€€å‡ºï¼‰
+    //   3. ä¸åš AVX2 gatherï¼ˆå®æµ‹æ¯”æ ‡é‡æ…¢ï¼Œä¸”æ— æ³•æå‰é€€å‡ºï¼‰
     //
-    // ÊıÑ§±£Ö¤£¨bits < 2^31 Ê±£©£º
+    // æ•°å­¦ä¿è¯ï¼ˆbits < 2^31 æ—¶ï¼‰ï¼š
     //   reciprocal = 2^32 / bits
-    //   q = (x * reciprocal) >> 32£¬Îó²î <= 1
-    //   r = x - q * bits£¬×î¶àĞŞÕıÒ»´Î
-    //   Êµ¼Ê Bloom ´óĞ¡ ~178KB ¡Á 8 = 1.4M bit£¬Ô¶Ğ¡ÓÚ 2^31£¬°²È«
+    //   q = (x * reciprocal) >> 32ï¼Œè¯¯å·® <= 1
+    //   r = x - q * bitsï¼Œæœ€å¤šä¿®æ­£ä¸€æ¬¡
+    //   å®é™… Bloom å¤§å° ~178KB Ã— 8 = 1.4M bitï¼Œè¿œå°äº 2^31ï¼Œå®‰å…¨
     // ============================================================================
     class BloomFilter {
     public:
         BloomFilter() = default;
 
         explicit BloomFilter(std::string data) : data_(std::move(data)) {
+            if (data_.size() >= 6 && std::memcmp(data_.data(), "LRNB", 4) == 0) {
+                uint16_t count = 0;
+                std::memcpy(&count, data_.data() + 4, sizeof(count));
+                const size_t header = 6 + static_cast<size_t>(count) * 2;
+                const bool plausible = count > 0 && count <= 4096 &&
+                    header < data_.size() && data_.size() - header >= 2 &&
+                    static_cast<uint8_t>(data_.back()) >= 1 &&
+                    static_cast<uint8_t>(data_.back()) <= 30;
+                if (!plausible) {
+                    // é­”æ•°å‘½ä¸­ä½†å¸ƒå±€ä¸åˆæ³•ï¼šå½“ä½œâ€œå¯èƒ½å­˜åœ¨â€ï¼Œé¿å…æŠŠåŒ…è£…å­—èŠ‚å½“æˆä½å›¾äº§ç”Ÿå‡é˜´æ€§ã€‚
+                    data_.clear();
+                    return;
+                }
+                prefixes_.resize(count);
+                std::memcpy(prefixes_.data(), data_.data() + 6, prefixes_.size() * sizeof(uint16_t));
+                learned_ = true;
+                data_.erase(0, header);
+            }
             if (data_.empty()) return;
             int k = static_cast<uint8_t>(data_.back());
             if (k > 30) return;
@@ -122,6 +187,9 @@ namespace lsm {
         }
 
         bool MightContain(const Slice& key) const {
+            if (learned_ &&
+                !std::binary_search(prefixes_.begin(), prefixes_.end(), BloomKeyPrefix(key)))
+                return false;
             if (data_.empty() || k_ == 0 || bits_ == 0) return true;
 
             uint64_t h64 = BloomHash::HashOne(key.data(), key.size());
@@ -133,7 +201,7 @@ namespace lsm {
             const uint32_t bits = bits_;
             const uint32_t recip = bits_reciprocal_;
 
-            // ÅúÁ¿ËãÎ»ÖÃ£¨ÎŞ³ı·¨£©
+            // æ‰¹é‡ç®—ä½ç½®ï¼ˆæ— é™¤æ³•ï¼‰
             uint32_t pos[30];
             uint32_t x = h1;
             for (int i = 0; i < k_; ++i) {
@@ -141,12 +209,12 @@ namespace lsm {
                 x += delta;
             }
 
-            // Ò»´ÎĞÔÔ¤È¡
+            // ä¸€æ¬¡æ€§é¢„å–
             for (int i = 0; i < k_; ++i) {
                 LSM_PREFETCH_T0(base + pos[i] / 8);
             }
 
-            // ±êÁ¿¼ì²é£¬Ö§³ÖÌáÇ°ÍË³ö
+            // æ ‡é‡æ£€æŸ¥ï¼Œæ”¯æŒæå‰é€€å‡º
             for (int i = 0; i < k_; ++i) {
                 if (!(base[pos[i] / 8] & (1 << (pos[i] % 8)))) return false;
             }
@@ -165,9 +233,11 @@ namespace lsm {
         }
 
         std::string data_;
+        std::vector<uint16_t> prefixes_;
         uint32_t    bits_ = 0;
         uint32_t    bits_reciprocal_ = 0;
         int         k_ = 0;
+        bool        learned_ = false;
     };
 
 } // namespace lsm
