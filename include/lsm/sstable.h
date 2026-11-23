@@ -15,23 +15,26 @@
 
 namespace lsm {
 
+    class AsyncIOBackend;
+    struct FilterTelemetry;
+
     // ============================================================================
-    // SSTable ²¼¾Ö£º
+    // SSTable å¸ƒå±€ï¼š
     //   [DataBlock 0][DataBlock 1]...[DataBlock N-1]
     //   [Bloom Block]
-    //   [Index Block]      : Ã¿Ïî u32 klen | u64 block_offset | u64 block_size | ikey
+    //   [Index Block]      : æ¯é¡¹ u32 klen | u64 block_offset | u64 block_size | ikey
     //   [Footer 44B]       : u64 index_off | u64 index_size
     //                        u64 bloom_off | u64 bloom_size | u32 magic
     //
-    // Ã¿¸ö DataBlock Î²²¿ÓĞ 5 ×Ö½Ú trailer£º
-    //   u8 compression_type(ºã 0) | u32 crc32c
+    // æ¯ä¸ª DataBlock å°¾éƒ¨æœ‰ 5 å­—èŠ‚ trailerï¼š
+    //   u8 compression_type(æ’ 0) | u32 crc32c
     // ============================================================================
 
     constexpr uint32_t kSSTMagic = 0x4c534d53u;
     constexpr size_t   kBlockTrailerSize = 5;
 
     // ============================================================================
-    // TableBuilder£º¹¹½¨ SSTable
+    // TableBuilderï¼šæ„å»º SSTable
     // ============================================================================
     class TableBuilder {
     public:
@@ -73,7 +76,7 @@ namespace lsm {
     };
 
     // ============================================================================
-    // TableReader£º¶ÁÈ¡ SSTable
+    // TableReaderï¼šè¯»å– SSTable
     // ============================================================================
     class TableReader {
     public:
@@ -82,13 +85,13 @@ namespace lsm {
             std::shared_ptr<ShardedLRUCache> cache);
 
         // ========================================================================
-        // OpenBatch£ºÅúÁ¿²¢ĞĞ´ò¿ª£¬ÓÃÓÚ VersionSet::Recover
+        // OpenBatchï¼šæ‰¹é‡å¹¶è¡Œæ‰“å¼€ï¼Œç”¨äº VersionSet::Recover
         //
-        // ÄÚ²¿ÓÃ AsyncIOBackend Ò»´ÎÌá½»ËùÓĞ Footer ¶ÁÈ¡£¬Ò»´ÎÌá½»ËùÓĞ
-        // Bloom+Index ¶ÁÈ¡¡£15 ¸ö SST ´Ó 45 ´ÎÍ¬²½ pread ½µµ½ 2 ´ÎÅúÁ¿Òì²½ I/O¡£
+        // å†…éƒ¨ç”¨ AsyncIOBackend ä¸€æ¬¡æäº¤æ‰€æœ‰ Footer è¯»å–ï¼Œä¸€æ¬¡æäº¤æ‰€æœ‰
+        // Bloom+Index è¯»å–ã€‚15 ä¸ª SST ä» 45 æ¬¡åŒæ­¥ pread é™åˆ° 2 æ¬¡æ‰¹é‡å¼‚æ­¥ I/Oã€‚
         //
-        // results Óë paths Ò»Ò»¶ÔÓ¦£»ÈÎºÎÊ§°Üµ¼ÖÂÕû¸öÅú´ÎÊ§°Ü£¨²»·µ»Ø²¿·Ö½á¹û£©¡£
-        // AsyncIOBackend ²»¿ÉÓÃ»òÊ§°ÜÊ±£¬»ØÍËµ½Öğ¸ö Open¡£
+        // results ä¸ paths ä¸€ä¸€å¯¹åº”ï¼›ä»»ä½•å¤±è´¥å¯¼è‡´æ•´ä¸ªæ‰¹æ¬¡å¤±è´¥ï¼ˆä¸è¿”å›éƒ¨åˆ†ç»“æœï¼‰ã€‚
+        // AsyncIOBackend ä¸å¯ç”¨æˆ–å¤±è´¥æ—¶ï¼Œå›é€€åˆ°é€ä¸ª Openã€‚
         // ========================================================================
         static Status OpenBatch(
             const std::vector<std::string>& paths,
@@ -105,6 +108,14 @@ namespace lsm {
         };
 
         Result Get(const Slice& user_key) const;
+
+        // æŠŠå°šæœªç¼“å­˜çš„æ•°æ®å—é€šè¿‡ AsyncIOBackend è¯»å…¥ block cacheã€‚
+        // å•ä¸ªå—å¤±è´¥ä¸ä¼šä½¿æ•´ä¸ªé¢„å–å¤±è´¥ï¼›Submit/Wait å¤±è´¥åˆ™è¿”å›é”™è¯¯ã€‚
+        Status PrefetchDataBlocks(AsyncIOBackend* backend) const;
+
+        void SetFilterTelemetry(FilterTelemetry* telemetry) noexcept {
+            telemetry_ = telemetry;
+        }
 
         class Iterator {
         public:
@@ -149,14 +160,14 @@ namespace lsm {
             BlockHandle handle;
         };
 
-        // ÆÕÍ¨¹¹Ôì£º²»´ò¿ªÎÄ¼ş£¨ÓÉ Open ÉèÖÃ file_£©
+        // æ™®é€šæ„é€ ï¼šä¸æ‰“å¼€æ–‡ä»¶ï¼ˆç”± Open è®¾ç½® file_ï¼‰
         TableReader(std::string path, uint64_t file_number,
             std::shared_ptr<ShardedLRUCache> cache)
             : path_(std::move(path)), file_number_(file_number),
             cache_(std::move(cache)) {
         }
 
-        // ÅúÁ¿¹¹Ôì£ºÖ±½Ó³ÖÓĞÒÑ´ò¿ªµÄ file_£¨OpenBatch ÓÃ£©
+        // æ‰¹é‡æ„é€ ï¼šç›´æ¥æŒæœ‰å·²æ‰“å¼€çš„ file_ï¼ˆOpenBatch ç”¨ï¼‰
         TableReader(std::string path, uint64_t file_number,
             std::shared_ptr<ShardedLRUCache> cache,
             std::unique_ptr<RandomAccessFile> file)
@@ -166,9 +177,9 @@ namespace lsm {
 
         bool ParseMeta();
 
-        // ¡ï ´ÓÒÑ¶ÁºÃµÄ buffer ³õÊ¼»¯ bloom_ ºÍ index_£¬²»½øĞĞ I/O
-        //   payload_buf ÊÇ [payload_start, payload_start + payload_len) µÄ×Ö½Ú£¬
-        //   ÄÚ²¿°´ bloom_off / index_off Ïà¶ÔÓÚ payload_start µÄÆ«ÒÆ²ğ·Ö
+        // â˜… ä»å·²è¯»å¥½çš„ buffer åˆå§‹åŒ– bloom_ å’Œ index_ï¼Œä¸è¿›è¡Œ I/O
+        //   payload_buf æ˜¯ [payload_start, payload_start + payload_len) çš„å­—èŠ‚ï¼Œ
+        //   å†…éƒ¨æŒ‰ bloom_off / index_off ç›¸å¯¹äº payload_start çš„åç§»æ‹†åˆ†
         bool InitFromPayload(const std::string& payload_buf,
             uint64_t payload_start,
             uint64_t bloom_off, uint64_t bloom_size,
@@ -190,6 +201,7 @@ namespace lsm {
         uint64_t                bloom_size_ = 0;
         uint64_t                data_end_ = 0;
         uint64_t                num_entries_ = 0;
+        FilterTelemetry*        telemetry_ = nullptr;
     };
 
 } // namespace lsm
