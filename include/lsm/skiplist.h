@@ -12,27 +12,27 @@
 namespace lsm {
 
     // ============================================================================
-    // ÎŞËøÌø±í£¬²ÉÓÃ RocksDB InlineSkipList ·ç¸ñµÄ½ô´Õ½Úµã²¼¾Ö
+    // æ— é”è·³è¡¨ï¼Œé‡‡ç”¨ RocksDB InlineSkipList é£æ ¼çš„ç´§å‡‘èŠ‚ç‚¹å¸ƒå±€
     //
-    // ½ÚµãÄÚ´æ²¼¾Ö£¨µ¥´Î Arena ·ÖÅä£¬Á¬Ğø£©£º
-    //   [Node Í·: height, key_size, value_size]        (12 ×Ö½Ú£¬¶ÔÆëµ½ 16)
-    //   [std::atomic<Node*> next[0]]                    (8 ×Ö½Ú)
-    //   [std::atomic<Node*> next[1]]                    (8 ×Ö½Ú)
+    // èŠ‚ç‚¹å†…å­˜å¸ƒå±€ï¼ˆå•æ¬¡ Arena åˆ†é…ï¼Œè¿ç»­ï¼‰ï¼š
+    //   [Node å¤´: height, key_size, value_size]        (12 å­—èŠ‚ï¼Œå¯¹é½åˆ° 16)
+    //   [std::atomic<Node*> next[0]]                    (8 å­—èŠ‚)
+    //   [std::atomic<Node*> next[1]]                    (8 å­—èŠ‚)
     //   ...
     //   [std::atomic<Node*> next[height-1]]
-    //   [key bytes]                                     (key_size ×Ö½Ú)
-    //   [value bytes]                                   (value_size ×Ö½Ú)
+    //   [key bytes]                                     (key_size å­—èŠ‚)
+    //   [value bytes]                                   (value_size å­—èŠ‚)
     //
-    // ÓÅÊÆ£º
-    //   1. Ò»´Î·ÖÅä£¨Í· + next Êı×é + key + value£©£¬ÎŞ¶îÍâ¶Ñ·ÖÅä
-    //   2. next[0] ºÍ key ÔÚÏàÁÚÄÚ´æ£¬»º´æĞĞÃüÖĞÂÊ¸ß
-    //   3. ±ä³¤´æ´¢£¬ÎŞ std::string µÄ SSO/¶Ñ·ÖÅä¿ªÏú
-    //   4. ÓëÎŞËø CAS Ğ´Èë¼æÈİ£¨release/acquire ÄÚ´æĞò±£»¤½ÚµãÄÚÈİ¿É¼ûĞÔ£©
+    // ä¼˜åŠ¿ï¼š
+    //   1. ä¸€æ¬¡åˆ†é…ï¼ˆå¤´ + next æ•°ç»„ + key + valueï¼‰ï¼Œæ— é¢å¤–å †åˆ†é…
+    //   2. next[0] å’Œ key åœ¨ç›¸é‚»å†…å­˜ï¼Œç¼“å­˜è¡Œå‘½ä¸­ç‡é«˜
+    //   3. å˜é•¿å­˜å‚¨ï¼Œæ—  std::string çš„ SSO/å †åˆ†é…å¼€é”€
+    //   4. ä¸æ— é” CAS å†™å…¥å…¼å®¹ï¼ˆrelease/acquire å†…å­˜åºä¿æŠ¤èŠ‚ç‚¹å†…å®¹å¯è§æ€§ï¼‰
     //
-    // Iterator ½Ó¿Ú±ä»¯£º
-    //   - ¾É: const std::string& key() / value()
-    //   - ĞÂ: Slice Key() / Value()
-    //   ¼õÉÙÒ»´Î const char* ¡ú std::string µÄÒşÊ½×ª»»
+    // Iterator æ¥å£å˜åŒ–ï¼š
+    //   - æ—§: const std::string& key() / value()
+    //   - æ–°: Slice Key() / Value()
+    //   å‡å°‘ä¸€æ¬¡ const char* â†’ std::string çš„éšå¼è½¬æ¢
     // ============================================================================
     template <typename Comparator>
     class SkipList {
@@ -46,7 +46,7 @@ namespace lsm {
         }
 
         // ========================================================================
-        // ½ô´Õ½Úµã£ºËùÓĞÊı¾İ´Ó Arena µ¥´Î·ÖÅä£¬Í¨¹ı¾²Ì¬·½·¨·ÃÎÊ
+        // ç´§å‡‘èŠ‚ç‚¹ï¼šæ‰€æœ‰æ•°æ®ä» Arena å•æ¬¡åˆ†é…ï¼Œé€šè¿‡é™æ€æ–¹æ³•è®¿é—®
         // ========================================================================
         struct Node {
             int      height;
@@ -82,8 +82,8 @@ namespace lsm {
         };
 
         // ========================================================================
-        // ²åÈë£ºµ±Ç°ÓÉÍâ²¿´®ĞĞ»¯£¨DB::memtable_mu_£©
-        // ÏÂÒ»½×¶Î»á¸ÄÎª CAS ÎŞËøĞ´Èë
+        // æ’å…¥ï¼šå½“å‰ç”±å¤–éƒ¨ä¸²è¡ŒåŒ–ï¼ˆDB::memtable_mu_ï¼‰
+        // ä¸‹ä¸€é˜¶æ®µä¼šæ”¹ä¸º CAS æ— é”å†™å…¥
         // ========================================================================
         void Insert(const std::string& key, const std::string& value) {
             Node* prev[kMaxHeight];
@@ -133,8 +133,9 @@ namespace lsm {
 
         class Iterator {
         public:
+            Iterator() noexcept : node_(nullptr) {}
             explicit Iterator(const SkipList* l)
-                : node_(l->head_->Next(0).load(std::memory_order_acquire)) {
+                : node_(l ? l->head_->Next(0).load(std::memory_order_acquire) : nullptr) {
             }
             bool Valid() const noexcept { return node_ != nullptr; }
             Slice Key()   const noexcept { return node_->Key(); }
