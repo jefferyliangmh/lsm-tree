@@ -11,16 +11,18 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # ============================================================================
-# Æ½Ì¨ÎŞ¹ØÔ´ÎÄ¼ş
+# Æ½Ì¨æ— å…³Ô´æ–‡ä»¶
 #
-# ÕâĞ©ÎÄ¼ş²»º¬ÈÎºÎÆ½Ì¨ #ifdef£¬Ö»ÒÀÀµ lsm/env.h ºÍ lsm/async_io.h ³éÏó½Ó¿Ú¡£
-# Æ½Ì¨ÅĞ¶ÏÈ«²¿¼¯ÖĞÔÚÏÂ·½µÄ if(WIN32)/elseif(UNIX) ·ÖÅÉÖĞ¡£
+# è¿™Ğ©æ–‡ä»¶ä¸å«ä»»ä½•Æ½Ì¨ #ifdefï¼ŒÖ»ä¾èµ– lsm/env.h å’Œ lsm/async_io.h æŠ½è±¡æ¥å£ã€‚
+# Æ½Ì¨åˆ¤æ–­È«éƒ¨é›†ä¸­åœ¨ä¸‹æ–¹çš„ if(WIN32)/elseif(UNIX) åˆ†æ´¾ä¸­ã€‚
 # ============================================================================
 add_library(lsm STATIC
     src/block.cpp
     src/block_cache.cpp
     src/compaction.cpp
     src/db.cpp
+    src/metrics.cpp
+    src/scheduler.cpp
     src/sstable.cpp
     src/version.cpp
     src/version_edit.cpp
@@ -33,21 +35,26 @@ target_include_directories(lsm PUBLIC
 )
 
 # ============================================================================
-# Æ½Ì¨Ïà¹ØÔ´ÎÄ¼ş£ºÎ¨Ò»µÄÆ½Ì¨ÅĞ¶Ïµã
+# Æ½Ì¨ç›¸å…³Ô´æ–‡ä»¶ï¼šÎ¨Ò»çš„Æ½Ì¨åˆ¤æ–­ç‚¹
 # ============================================================================
 if(WIN32)
     target_sources(lsm PRIVATE
         src/env_win.cpp
         src/async_io_win.cpp
     )
-    # /utf-8£ºÔ´ÂëÊÇ UTF-8£¬Ïû³ı C4819£¨´úÂëÒ³ 936 ÎŞ·¨±íÊ¾ÖĞÎÄ£©
-    target_compile_options(lsm PRIVATE /W4 /utf-8)
     target_compile_definitions(lsm PRIVATE
-        _CRT_SECURE_NO_WARNINGS
-        NOMINMAX              # ½ûÓÃ Windows.h µÄ min/max ºê
-        WIN32_LEAN_AND_MEAN   # ¼õĞ¡ Windows.h Ìå»ı
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
     )
-    # IOCP ²»ĞèÒª¶îÍâÁ´½Ó¿â£¨kernel32.dll ÒşÊ½Á´½Ó£©
+    if(MSVC)
+        target_compile_options(lsm PRIVATE /W4 /utf-8)
+        target_compile_definitions(lsm PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        # MinGW, including cross compilation from Linux. Do not pass MSVC flags.
+        target_compile_options(lsm PRIVATE -Wall -Wextra -Wpedantic -O3)
+        find_package(Threads REQUIRED)
+        target_link_libraries(lsm PUBLIC Threads::Threads)
+    endif()
 
 elseif(UNIX)
     target_sources(lsm PRIVATE
@@ -58,7 +65,7 @@ elseif(UNIX)
     find_package(Threads REQUIRED)
     target_link_libraries(lsm PUBLIC Threads::Threads)
 
-    # liburing ×Ô¶¯¼ì²â£ºÕÒµ½ÔòÆôÓÃ io_uring£¬·ñÔòÍË»¯µ½ pread
+    # liburing è‡ªåŠ¨æ£€æµ‹ï¼šæ‰¾åˆ°åˆ™å¯ç”¨ io_uringï¼Œå¦åˆ™é€€åŒ–åˆ° pread
     find_library(URING_LIB uring)
     if(URING_LIB)
         target_compile_definitions(lsm PUBLIC HAS_LIBURING=1)
@@ -73,14 +80,19 @@ else()
 endif()
 
 # ============================================================================
-# ²âÊÔºÍ benchmark Ä¿±ê
+# æµ‹è¯•å’Œ benchmark Ä¿æ ‡
 #
-# Windows ÉÏÍ¬ÑùĞèÒª /utf-8£¬·ñÔòÔ´ÎÄ¼şÀïµÄÖĞÎÄ×¢ÊÍ»á´¥·¢ C4819¡£
-# ÓÃº¯Êı·â×°±ÜÃâÖØ¸´¡£
+# Windows ä¸ŠÍ¬æ ·éœ€Òª /utf-8ï¼Œå¦åˆ™Ô´æ–‡ä»¶é‡Œçš„ä¸­æ–‡×¢é‡Šä¼šè§¦å‘ C4819ã€‚
+# ç”¨å‡½æ•°å°×°é¿å…é‡å¤ã€‚
 # ============================================================================
 function(set_platform_options target)
-    if(WIN32)
+    if(MSVC)
         target_compile_options(${target} PRIVATE /utf-8)
+        target_compile_definitions(${target} PRIVATE
+            NOMINMAX
+            WIN32_LEAN_AND_MEAN
+        )
+    elseif(WIN32)
         target_compile_definitions(${target} PRIVATE
             NOMINMAX
             WIN32_LEAN_AND_MEAN
@@ -91,7 +103,7 @@ endfunction()
 enable_testing()
 
 # ---------------------------------------------------------------------------
-# µ¥Ôª²âÊÔ
+# å•Ôªæµ‹è¯•
 # ---------------------------------------------------------------------------
 add_executable(lsm_test tests/test_lsm.cpp)
 target_link_libraries(lsm_test PRIVATE lsm)
@@ -109,7 +121,7 @@ set_platform_options(lsm_hash_test)
 add_test(NAME hash_avx2 COMMAND lsm_hash_test)
 
 # ---------------------------------------------------------------------------
-# »ù×¼²âÊÔ
+# åŸº×¼æµ‹è¯•
 # ---------------------------------------------------------------------------
 add_executable(lsm_bench benchmarks/bench.cpp)
 target_link_libraries(lsm_bench PRIVATE lsm)
@@ -126,3 +138,35 @@ set_platform_options(lsm_crc32c_bench)
 add_executable(lsm_hash_bench benchmarks/bench_hash_avx2.cpp)
 target_link_libraries(lsm_hash_bench PRIVATE lsm)
 set_platform_options(lsm_hash_bench)
+
+add_executable(lsm_test_advanced tests/test_advanced.cpp)
+target_link_libraries(lsm_test_advanced PRIVATE lsm)
+set_platform_options(lsm_test_advanced)
+add_test(NAME advanced COMMAND lsm_test_advanced)
+
+add_executable(lsm_bench_amp benchmarks/bench_amplification.cpp)
+target_link_libraries(lsm_bench_amp PRIVATE lsm)
+set_platform_options(lsm_bench_amp)
+
+add_executable(lsm_bench_memtable benchmarks/bench_memtable.cpp)
+target_link_libraries(lsm_bench_memtable PRIVATE lsm)
+set_platform_options(lsm_bench_memtable)
+
+# Same harness as the RocksDB binary, compiled against this engine.
+add_executable(lsm_bench_external benchmarks/bench_external_compare.cpp)
+target_link_libraries(lsm_bench_external PRIVATE lsm)
+set_platform_options(lsm_bench_external)
+
+# Optional RocksDB comparison. Present on Debian as librocksdb-dev.
+find_path(ROCKSDB_INCLUDE_DIR rocksdb/db.h)
+find_library(ROCKSDB_LIBRARY rocksdb)
+if(ROCKSDB_INCLUDE_DIR AND ROCKSDB_LIBRARY)
+    add_executable(lsm_bench_rocksdb benchmarks/bench_external_compare.cpp)
+    target_include_directories(lsm_bench_rocksdb PRIVATE ${ROCKSDB_INCLUDE_DIR})
+    target_compile_definitions(lsm_bench_rocksdb PRIVATE COMPARE_ROCKSDB)
+    target_link_libraries(lsm_bench_rocksdb PRIVATE ${ROCKSDB_LIBRARY})
+    set_platform_options(lsm_bench_rocksdb)
+    message(STATUS "RocksDB comparison benchmark enabled")
+else()
+    message(STATUS "RocksDB not found: lsm_bench_rocksdb will not be built")
+endif()
