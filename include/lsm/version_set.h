@@ -13,6 +13,8 @@
 
 namespace lsm {
 
+    struct FilterTelemetry;
+
     class Version {
     public:
         struct FileMeta {
@@ -54,6 +56,9 @@ namespace lsm {
 
         Status NewFileNumber(uint64_t* number);
         bool CommitStateUncertain() const;
+        void SetFilterTelemetry(FilterTelemetry* telemetry) noexcept {
+            filter_telemetry_ = telemetry;
+        }
 
     private:
         // ★ 无锁实现：调用者必须已持有 mu_
@@ -78,6 +83,7 @@ namespace lsm {
         uint64_t manifest_number_ = 1;
         bool commit_state_uncertain_ = false;
         std::unique_ptr<WritableFile> manifest_file_;
+        FilterTelemetry* filter_telemetry_ = nullptr;
     };
 
 } // namespace lsm

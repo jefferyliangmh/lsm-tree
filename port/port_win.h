@@ -7,7 +7,7 @@
 //
 // 这些只被 env_win.cpp 使用，主框架不直接依赖。
 // ============================================================================
-#include <Windows.h>
+#include <windows.h>
 #include <cstdint>
 #include <string>
 
