@@ -22,6 +22,7 @@
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
 #include <rocksdb/table.h>
+#include <rocksdb/version.h>
 #else
 #include "lsm/db.h"
 #endif
@@ -74,7 +75,9 @@ public:
 		table_options.block_restart_interval = 8;
 		table_options.block_cache = rocksdb::NewLRUCache(512ull * 1024 * 1024);
 		options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
-		rocksdb::Status status = rocksdb::DB::Open(options, path, &db_);
+		rocksdb::DB* opened = nullptr;
+		rocksdb::Status status = rocksdb::DB::Open(options, path, &opened);
+		db_.reset(opened);
 		if (!status.ok()) SetError(status.ToString());
 		return status.ok();
 #else
@@ -433,11 +436,17 @@ int main(int argc, char** argv) {
 #if defined(COMPARE_LEVELDB)
 	const char* engine = "LevelDB 1.23";
 #elif defined(COMPARE_ROCKSDB)
-	const char* engine = "RocksDB 11.13.2";
+	char engine_buf[64];
+	std::snprintf(engine_buf, sizeof(engine_buf), "RocksDB %d.%d.%d",
+		ROCKSDB_MAJOR, ROCKSDB_MINOR, ROCKSDB_PATCH);
+	const char* engine = engine_buf;
 #else
 	const char* engine = "local LSM";
 #endif
-	const std::filesystem::path root = std::filesystem::path("C:/lsm_external_compare/data") /
+	const char* root_env = std::getenv("LSM_BENCH_ROOT");
+	const std::filesystem::path root = (root_env && *root_env
+		? std::filesystem::path(root_env)
+		: std::filesystem::temp_directory_path() / "lsm_external_compare") /
 #if defined(COMPARE_LEVELDB)
 		"leveldb";
 #elif defined(COMPARE_ROCKSDB)
