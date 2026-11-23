@@ -1,7 +1,9 @@
 #include "lsm/compaction.h"
+#include "lsm/async_io.h"
 #include "lsm/internal_key.h"
 
 #include <algorithm>
+#include <cstdio>
 
 namespace lsm {
 
@@ -67,6 +69,47 @@ namespace lsm {
             }
         }
         return false;
+    }
+
+    CompactionPolicy::Input BuildTiered(const Version& v, int level) {
+        CompactionPolicy::Input in;
+        in.from_level = level;
+        const int last = static_cast<int>(v.levels.size()) - 1;
+        if (last < 0 || level < 0 || level >= static_cast<int>(v.levels.size()) ||
+            v.levels[level].empty())
+            return in;
+        in.to_level = (level < last) ? level + 1 : level;
+
+        bool first = true;
+        for (const auto& f : v.levels[level]) {
+            in.input_file_numbers.push_back(f.number);
+            if (first) {
+                in.smallest_ikey = f.smallest_ikey;
+                in.largest_ikey = f.largest_ikey;
+                first = false;
+                continue;
+            }
+            if (CompareInternal(Slice(f.smallest_ikey), Slice(in.smallest_ikey)) < 0)
+                in.smallest_ikey = f.smallest_ikey;
+            if (CompareInternal(Slice(f.largest_ikey), Slice(in.largest_ikey)) > 0)
+                in.largest_ikey = f.largest_ikey;
+        }
+
+        bool foreign = false;
+        if (in.to_level != in.from_level &&
+            !v.Overlapping(in.to_level, in.smallest_ikey, in.largest_ikey).empty())
+            foreign = true;
+        if (HasOverlappingFilesBelow(v, in.to_level, in.smallest_ikey, in.largest_ikey))
+            foreign = true;
+        in.is_bottommost = !foreign;
+        return in;
+    }
+
+    size_t TieredTrigger(int level, const Options& opt) {
+        const int fanout = std::max(2, opt.tiered_fanout);
+        if (level == 0)
+            return static_cast<size_t>(std::max(2, std::min(fanout, std::max(1, opt.level0_trigger))));
+        return static_cast<size_t>(fanout);
     }
 
     LeveledPolicy::Input LeveledPolicy::BuildL0Compaction(const Version& v) {
@@ -147,6 +190,72 @@ namespace lsm {
         return result;
     }
 
+    std::vector<CompactionPolicy::Input> TieredPolicy::PickCompaction(
+        const Version& v, const Options& opt) {
+        std::vector<Input> result;
+        for (int level = 0; level < static_cast<int>(v.levels.size()); ++level) {
+            if (v.levels[level].size() >= TieredTrigger(level, opt)) {
+                result.push_back(BuildTiered(v, level));
+                return result;
+            }
+        }
+        return result;
+    }
+
+    std::vector<CompactionPolicy::Input> HybridPolicy::PickCompaction(
+        const Version& v, const Options& opt) {
+        std::vector<Input> result;
+        if (v.levels.empty()) return result;
+        const bool write_heavy =
+            opt.observed_write_read_ratio >= opt.hybrid_write_heavy_ratio;
+        auto use_tiered = [&](int level) {
+            return write_heavy && level < opt.hybrid_leveled_from;
+        };
+
+        if (v.levels[0].size() >= static_cast<size_t>(std::max(1, opt.level0_trigger))) {
+            if (use_tiered(0)) result.push_back(BuildTiered(v, 0));
+            else {
+                LeveledPolicy leveled;
+                result.push_back(leveled.BuildL0Compaction(v));
+            }
+            return result;
+        }
+
+        for (int level = 1; level + 1 < static_cast<int>(v.levels.size()); ++level) {
+            if (use_tiered(level) &&
+                v.levels[level].size() >= TieredTrigger(level, opt)) {
+                result.push_back(BuildTiered(v, level));
+                return result;
+            }
+            const size_t size = LeveledPolicy::TotalSize(v.levels[level]);
+            const size_t target = LeveledPolicy::TargetLevelSize(level, opt);
+            if (size > target && !v.levels[level].empty()) {
+                LeveledPolicy leveled;
+                result.push_back(leveled.BuildLevelCompaction(v, level));
+                return result;
+            }
+        }
+
+        const int last = static_cast<int>(v.levels.size()) - 1;
+        if (last > 0 && use_tiered(last) &&
+            v.levels[last].size() >= TieredTrigger(last, opt)) {
+            result.push_back(BuildTiered(v, last));
+        }
+        return result;
+    }
+
+    std::unique_ptr<CompactionPolicy> MakeCompactionPolicy(CompactionStyle style) {
+        switch (style) {
+        case CompactionStyle::kSizeTiered:
+            return std::make_unique<TieredPolicy>();
+        case CompactionStyle::kHybrid:
+            return std::make_unique<HybridPolicy>();
+        case CompactionStyle::kLeveled:
+        default:
+            return std::make_unique<LeveledPolicy>();
+        }
+    }
+
     // ============================================================================
     // SyncCompactionIO::Run：按 max_file_size 切分输出
     // ============================================================================
@@ -154,11 +263,13 @@ namespace lsm {
     Status SyncCompactionIO::Run(const CompactionPolicy::Input& input,
         const std::vector<std::shared_ptr<TableReader>>& readers,
         const std::string& output_dir,
-        uint64_t first_output_number,
+        const std::function<Status(uint64_t*)>& allocate_file_number,
         const Options& opt,
         std::vector<VersionEdit::FileMeta>* outputs) {
         outputs->clear();
         if (readers.empty()) return Status::OK();
+        if (!allocate_file_number)
+            return Status::InvalidArgument("missing file number allocator");
 
         struct Cand { std::unique_ptr<TableReader::Iterator> it; };
         std::vector<Cand> cands;
@@ -170,8 +281,11 @@ namespace lsm {
                 return cands.back().it->status();
         }
 
-        uint64_t out_number = first_output_number;
-        std::string out_path = output_dir + "/" + std::to_string(out_number) + ".sst";
+        uint64_t out_number = 0;
+        std::string out_path;
+        Status alloc_st = allocate_file_number(&out_number);
+        if (!alloc_st.ok()) return alloc_st;
+        out_path = output_dir + "/" + std::to_string(out_number) + ".sst";
         auto builder = std::make_unique<TableBuilder>(out_path, opt);
         auto cleanup_outputs = [&] {
             builder.reset();
@@ -233,7 +347,11 @@ namespace lsm {
                         return st;
                     }
 
-                    ++out_number;
+                    alloc_st = allocate_file_number(&out_number);
+                    if (!alloc_st.ok()) {
+                        cleanup_outputs();
+                        return alloc_st;
+                    }
                     out_path = output_dir + "/" + std::to_string(out_number) + ".sst";
                     builder = std::make_unique<TableBuilder>(out_path, opt);
                     out_has_entry = false;
@@ -271,6 +389,26 @@ namespace lsm {
         Status st = finalize_output();
         if (!st.ok()) cleanup_outputs();
         return st;
+    }
+
+    Status PipelinedCompactionIO::Run(const CompactionPolicy::Input& input,
+        const std::vector<std::shared_ptr<TableReader>>& readers,
+        const std::string& output_dir,
+        const std::function<Status(uint64_t*)>& allocate_file_number,
+        const Options& opt,
+        std::vector<VersionEdit::FileMeta>* outputs) {
+        if (AsyncIOBackend* io = AsyncIOBackend::Default()) {
+            for (const auto& reader : readers) {
+                if (!reader) continue;
+                Status st = reader->PrefetchDataBlocks(io);
+                if (!st.ok()) {
+                    std::fprintf(stderr,
+                        "[pipelined] prefetch degraded to synchronous reads: %s\n",
+                        st.ToString().c_str());
+                }
+            }
+        }
+        return sync_.Run(input, readers, output_dir, allocate_file_number, opt, outputs);
     }
 
 } // namespace lsm
