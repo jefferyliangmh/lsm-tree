@@ -14,6 +14,7 @@
 
 #include "lsm/async_io.h"
 
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -140,8 +141,11 @@ namespace lsm {
             // 线程池并行 pread：每个请求一个 std::thread
             // 对 OpenBatch 的 N 个请求，总耗时 ≈ 最慢的那个 pread
             void ThreadPoolFallback(const std::vector<Request>& reqs) {
-                std::fprintf(stderr, "[io_uring] thread-pool fallback, %zu reqs\n",
-                    reqs.size());
+                static std::atomic<int> announced{ 0 };
+                if (announced.exchange(1, std::memory_order_relaxed) == 0) {
+                    std::fprintf(stderr, "[io_uring] thread-pool fallback, %zu reqs\n",
+                        reqs.size());
+                }
 
                 fallback_tags_.assign(reqs.size(), 0);
                 fallback_statuses_.assign(reqs.size(), Status::OK());
