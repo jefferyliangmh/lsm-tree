@@ -11,6 +11,9 @@
 #include "lsm/compaction.h"
 #include "lsm/memtable.h"
 #include "lsm/options.h"
+#include "lsm/filter_policy.h"
+#include "lsm/metrics.h"
+#include "lsm/scheduler.h"
 #include "lsm/sstable.h"
 #include "lsm/status.h"
 #include "lsm/version.h"
@@ -45,6 +48,29 @@ namespace lsm {
         size_t immutable_memtables_peak = 0;
         uint64_t write_slowdowns = 0;
         uint64_t write_stops = 0;
+        uint64_t user_write_bytes = 0;
+        uint64_t flush_bytes = 0;
+        uint64_t compaction_input_bytes = 0;
+        uint64_t compaction_output_bytes = 0;
+        uint64_t block_reads = 0;
+        uint64_t block_read_bytes = 0;
+        uint64_t block_cache_hits = 0;
+        uint64_t prefetch_blocks = 0;
+        uint64_t prefetch_bytes = 0;
+        uint64_t filter_lookups = 0;
+        uint64_t filter_rejects = 0;
+        uint64_t filter_false_positives = 0;
+        uint64_t filter_hits = 0;
+        int tuned_bloom_bits = 0;
+        uint64_t scheduler_flush_tasks = 0;
+        uint64_t scheduler_compaction_tasks = 0;
+        size_t flush_queue_depth = 0;
+        size_t compaction_queue_depth = 0;
+        uint64_t io_overlap_events = 0;
+        std::string memtable_type;
+        std::string filter_kind;
+        std::string compaction_io;
+        std::vector<uint64_t> level_bytes;
         std::vector<size_t> level_files;
     };
 
@@ -58,9 +84,22 @@ namespace lsm {
         Status Get(const std::string& key, std::string* value);
         Status Flush();
         Status Compact();
+        // 用当前假阳性窗口调整后续 SSTable 的 bloom bits。后台循环也会调用。
+        void RetuneFilter();
 
         Stats GetStats() const;
         std::string CompactionPolicyName() const { return policy_->Name(); }
+        std::string MemTableTypeName() const { return lsm::MemTableTypeName(opt_.memtable_type); }
+        std::string FilterKindName() const {
+            return filter_policy_ ? filter_policy_->Name() : lsm::FilterKindName(opt_.filter_kind);
+        }
+        std::string CompactionIOName() const {
+            return compaction_io_ ? compaction_io_->Name() : std::string{};
+        }
+        int TunedBloomBits() const {
+            return filter_telemetry_ ? filter_telemetry_->tuned_bits.load(std::memory_order_relaxed)
+                                     : opt_.bloom_bits_per_key;
+        }
 
     private:
         Status WaitForWriteCapacity();
@@ -71,8 +110,12 @@ namespace lsm {
         Status CompactLocked();
         Status DoCompaction(const CompactionPolicy::Input& input);
         void   BackgroundLoop();
-        void   CompactionLoop();
         void   ScheduleCompaction();
+        void   ScheduleFlushWork();
+        void   ScheduleCompactionWork();
+        bool   FlushWorkerBody();
+        void   CompactionWorkerBody();
+        Options TableBuildOptions(int level) const;
         void   PublishSuperVersionLocked();
         void   AdvanceFailedSequence(uint64_t sequence);
 
@@ -104,15 +147,23 @@ namespace lsm {
 
         std::unique_ptr<CompactionPolicy> policy_;
         std::unique_ptr<CompactionIO> compaction_io_;
+        std::unique_ptr<FilterPolicy> filter_policy_;
+        std::shared_ptr<FilterTelemetry> filter_telemetry_;
 
+        // scheduler_ 必须在 bg_ 之前声明：析构时先 join bg_，再拆线程池。
+        std::unique_ptr<BackgroundScheduler> scheduler_;
         std::atomic<bool> shutdown_{ false };
-        std::thread bg_;
-        std::condition_variable compaction_cv_;
-        std::atomic<bool> compaction_pending_{ false };
-        std::thread compaction_thread_;
         std::mutex background_mu_;
         std::condition_variable background_cv_;
+        std::thread bg_;
+        std::mutex compaction_mu_;
+        std::atomic<bool> compaction_pending_{ false };
         std::atomic<bool> flush_pending_{ false };
+        std::atomic<bool> flush_inflight_{ false };
+        std::atomic<bool> compaction_inflight_{ false };
+        std::atomic<int64_t> flush_retry_not_before_ms_{ 0 };
+        std::atomic<int> flush_running_{ 0 };
+        std::atomic<int> compaction_running_{ 0 };
 
         struct AtomicStats {
             std::atomic<uint64_t> puts{ 0 };
@@ -136,6 +187,11 @@ namespace lsm {
             std::atomic<uint64_t> background_flush_ns{ 0 };
             std::atomic<uint64_t> background_flushes{ 0 };
             std::atomic<size_t> immutable_memtables_peak{ 0 };
+            std::atomic<uint64_t> user_write_bytes{ 0 };
+            std::atomic<uint64_t> flush_bytes{ 0 };
+            std::atomic<uint64_t> compaction_input_bytes{ 0 };
+            std::atomic<uint64_t> compaction_output_bytes{ 0 };
+            std::atomic<uint64_t> overlap_events{ 0 };
         };
         mutable AtomicStats stats_;
     };
