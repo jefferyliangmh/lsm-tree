@@ -1,6 +1,7 @@
 #include "lsm/version_set.h"
 #include "lsm/env.h"
 #include "lsm/crc32c.h"
+#include "lsm/metrics.h"
 
 #include <algorithm>
 #include <charconv>
@@ -289,6 +290,7 @@ namespace lsm {
                     missing_metas.push_back(pending_metas[i]);
                     continue;
                 }
+                readers[i]->SetFilterTelemetry(filter_telemetry_);
                 current_->AddFile(pending_metas[i].level, pending_metas[i],
                     std::move(readers[i]));
             }
@@ -368,6 +370,7 @@ namespace lsm {
             new_version->RemoveFile(df.first, df.second);
         for (size_t i = 0; i < edit->AddedFiles().size(); ++i) {
             auto& af = edit->AddedFiles()[i];
+            if (readers[i]) readers[i]->SetFilterTelemetry(filter_telemetry_);
             new_version->AddFile(af.level, af, readers[i]);
         }
 
