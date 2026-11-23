@@ -34,9 +34,9 @@ static int tests_run = 0;
     if (!(cond)) { std::fprintf(stderr, "FAIL: %s (line %d)\n", #cond, __LINE__); ++failures; } \
 } while (0)
 
-// ¡ï Windows ÉÏ remove_all ¶ÔÒÑ´ò¿ªµÄÎÄ¼ş»áÅ×Òì³£¡£
-//   ÓÃ error_code ÖØÔØ¾²Ä¬Ê§°Ü£º²âÊÔ½áÊøºó OS »áÇåÀí %TEMP% ÏÂµÄ²ĞÁô¡£
-//   Linux ÉÏ unlink ¶ÔÒÑ´ò¿ªµÄÎÄ¼ş³É¹¦£¬ÎŞÓ°Ïì¡£
+// â˜… Windows ä¸Š remove_all å¯¹å·²æ‰“å¼€çš„æ–‡ä»¶ä¼šæŠ›å¼‚å¸¸ã€‚
+//   ç”¨ error_code é‡è½½é™é»˜å¤±è´¥ï¼šæµ‹è¯•ç»“æŸå OS ä¼šæ¸…ç† %TEMP% ä¸‹çš„æ®‹ç•™ã€‚
+//   Linux ä¸Š unlink å¯¹å·²æ‰“å¼€çš„æ–‡ä»¶æˆåŠŸï¼Œæ— å½±å“ã€‚
 static void SafeRemoveAll(const std::string& path) {
     std::error_code ec;
     std::filesystem::remove_all(path, ec);
@@ -85,7 +85,7 @@ static void TestArena() {
 }
 
 // ============================================================================
-// [2] MANIFEST round-trip£ºÓÃ DB ¶Ëµ½¶ËÑéÖ¤
+// [2] MANIFEST round-tripï¼šç”¨ DB ç«¯åˆ°ç«¯éªŒè¯
 // ============================================================================
 static void TestManifestRoundTrip() {
     lsm::Options opt;
@@ -107,7 +107,7 @@ static void TestManifestRoundTrip() {
     {
         lsm::DB db(opt);
         auto st = db.GetStats();
-        // L0 ÖÁÉÙÒ»¸öÎÄ¼ş£¬Êı¾İÍêÕû
+        // L0 è‡³å°‘ä¸€ä¸ªæ–‡ä»¶ï¼Œæ•°æ®å®Œæ•´
         CHECK(st.level_files.size() >= 1);
         CHECK(st.level_files[0] >= 1);
 
@@ -121,7 +121,7 @@ static void TestManifestRoundTrip() {
 }
 
 // ============================================================================
-// [3] Clean-cut expansion£ºÖ»²â PickCompaction Âß¼­£¬reader ´« nullptr
+// [3] Clean-cut expansionï¼šåªæµ‹ PickCompaction é€»è¾‘ï¼Œreader ä¼  nullptr
 // ============================================================================
 static void TestCleanCutExpansion() {
     lsm::Options opt;
@@ -155,7 +155,7 @@ static void TestCleanCutExpansion() {
 }
 
 // ============================================================================
-// [4] SuperVersion ÑÓ³ÙÊÍ·Å
+// [4] SuperVersion å»¶è¿Ÿé‡Šæ”¾
 // ============================================================================
 static void TestVersionManagerIsolation() {
     lsm::VersionManager first;
@@ -305,7 +305,7 @@ static void TestWalResetDuringWrites() {
 }
 
 // ============================================================================
-// [6] CRUD + ÖØÆô»Ö¸´
+// [6] CRUD + é‡å¯æ¢å¤
 // ============================================================================
 static void TestCrudAndRestart() {
     lsm::Options opt;
@@ -337,7 +337,7 @@ static void TestCrudAndRestart() {
 }
 
 // ============================================================================
-// [7] Compaction ±£ÁôÎ´²ÎÓëÎÄ¼ş
+// [7] Compaction ä¿ç•™æœªå‚ä¸æ–‡ä»¶
 // ============================================================================
 static void TestCompactionPreservesUninvolved() {
     lsm::Options opt;
@@ -368,7 +368,7 @@ static void TestCompactionPreservesUninvolved() {
 }
 
 // ============================================================================
-// [8] ²¢·¢Ñ¹Á¦
+// [8] å¹¶å‘å‹åŠ›
 // ============================================================================
 static void TestConcurrentStress() {
     lsm::Options opt;
@@ -402,13 +402,13 @@ static void TestConcurrentStress() {
             (unsigned long long)st.flushes, (unsigned long long)st.compactions);
         CHECK(st.puts >= static_cast<uint64_t>(W * OPS));
         CHECK(st.gets >= static_cast<uint64_t>(R * OPS));
-    }   // ¡û db ÏÈÎö¹¹
+    }   // â† db å…ˆææ„
 
-    SafeRemoveAll(opt.db_path);   // ¡û ÔÙÉ¾Ä¿Â¼
+    SafeRemoveAll(opt.db_path);   // â† å†åˆ ç›®å½•
 }
 
 // ============================================================================
-// [9] Leveled Compaction ¶à²ã
+// [9] Leveled Compaction å¤šå±‚
 // ============================================================================
 static void TestConcurrentWriterBackpressureMakesProgress() {
     lsm::Options opt;
@@ -498,7 +498,7 @@ static void TestLeveledCompactionMultiLevel() {
         for (auto n : st.level_files) std::printf(" %zu", n);
         std::printf("\n");
 
-        // L2 Ó¦ÖÁÉÙÓĞÒ»¸öÎÄ¼ş
+        // L2 åº”è‡³å°‘æœ‰ä¸€ä¸ªæ–‡ä»¶
         CHECK(st.level_files.size() >= 3);
         CHECK(st.level_files[2] > 0);
 
@@ -510,7 +510,7 @@ static void TestLeveledCompactionMultiLevel() {
 }
 
 // ============================================================================
-// [10] Leveled Compaction ²ãÄÚ²»ÖØµş
+// [10] Leveled Compaction å±‚å†…ä¸é‡å 
 // ============================================================================
 static void TestLeveledNoOverlap() {
     lsm::Options opt;
@@ -997,7 +997,12 @@ static void TestCompactionPropagatesInputAndOutputErrors() {
             input.is_bottommost = true;
             lsm::SyncCompactionIO compaction;
             std::vector<lsm::VersionEdit::FileMeta> outputs;
-            auto status = compaction.Run(input, { reader }, output_path, 9000,
+            uint64_t next_number = 9000;
+            auto status = compaction.Run(input, { reader }, output_path,
+                [&next_number](uint64_t* number) {
+                    *number = next_number++;
+                    return lsm::Status::OK();
+                },
                 opt, &outputs);
             CHECK(!status.ok());
             CHECK(status.IsCorruption());
@@ -1042,7 +1047,12 @@ static void TestCompactionPropagatesInputAndOutputErrors() {
         input.is_bottommost = true;
         lsm::SyncCompactionIO compaction;
         std::vector<lsm::VersionEdit::FileMeta> outputs;
-        auto status = compaction.Run(input, { reader }, output_path, 9001,
+        uint64_t next_number = 9001;
+        auto status = compaction.Run(input, { reader }, output_path,
+            [&next_number](uint64_t* number) {
+                *number = next_number++;
+                return lsm::Status::OK();
+            },
             opt, &outputs);
         CHECK(!status.ok());
         CHECK(outputs.empty());
@@ -1396,7 +1406,7 @@ int main() {
         std::chrono::steady_clock::now() - suite_started).count();
     if (failures == 0) {
         std::printf("\n[PASS] all tests (%d cases; %.3fs)\n", tests_run, suite_seconds);
-        std::fflush(stdout);      // ¡ï Ç¿ÖÆ flush£¬·ÀÖ¹ abort Ê±¶ªÊ§
+        std::fflush(stdout);      // â˜… å¼ºåˆ¶ flushï¼Œé˜²æ­¢ abort æ—¶ä¸¢å¤±
         return 0;
     }
     std::printf("\n[FAIL] %d checks failed across %d test cases in %.3fs\n",
